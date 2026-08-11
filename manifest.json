@@ -1,0 +1,10 @@
+{
+  "id": "obsidian-aiproofreader-plugin",
+  "name": "智能校对助手",
+  "version": "1.0.0",
+  "minAppVersion": "1.0.0",
+  "description": "智能校对助手，通过AI 引擎检测文档中的错字、语法、符号问题，提供一键修复功能",
+  "author": "moaono.com",
+  "authorUrl": "http://www.moaono.com",
+  "isDesktopOnly": false
+}
