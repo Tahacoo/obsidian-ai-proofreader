@@ -24,18 +24,7 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 // src/main.ts
 var main_exports = {};
 __export(main_exports, {
-  AIDetector: () => AIDetector,
-  default: () => CSCPlugin,
-  detectPhraseErrors: () => detectPhraseErrors,
-  findPhraseMatches: () => findPhraseMatches,
-  locateUniqueOriginal: () => locateUniqueOriginal,
-  parsePhraseDictionary: () => parsePhraseDictionary,
-  toDetectionResult: () => toDetectionResult,
-  validateAIResult: () => validateAIResult,
-  addParagraphOffsets: () => addParagraphOffsets,
-  applyChangesToOffsets: () => applyChangesToOffsets,
-  locateParagraph: () => locateParagraph,
-  splitParagraphs: () => splitParagraphs
+  default: () => CSCPlugin
 });
 module.exports = __toCommonJS(main_exports);
 var import_obsidian5 = require("obsidian");
@@ -618,6 +607,9 @@ var CSCView = class extends import_obsidian2.ItemView {
   }
   renderHeader(container) {
     container.createEl("div", { cls: "csc-header" }, (header) => {
+      const filePath = this.plugin.detectionTarget?.path || this.plugin.lastMarkdownPath;
+      const fileName = filePath?.split(/[\\/]/).pop();
+      if (fileName) header.createEl("div", { cls: "csc-target-file", text: `当前文档：${fileName}`, attr: { title: fileName } });
       header.createEl("div", { cls: "csc-header-top" }, (top) => {
         top.createEl("div", { cls: "csc-title-row" }, (titleRow) => {
           const iconEl = titleRow.createEl("div", { cls: "csc-title-icon" });
@@ -1644,11 +1636,19 @@ var AIDetector = class {
             }
           }
           if (result && result.suggestions[0] !== result.original) {
+            if (segment.offsets) {
+              const start = segment.offsets.indexOf(result.offset);
+              if (start < 0 || start + result.original.length > segment.offsets.length || !segment.offsets.slice(start, start + result.original.length).every((offset, index) => offset === result.offset + index)) {
+                throw new Error("AI 结果跨越不连续的文本位置，不能安全替换");
+              }
+            }
             const key = `${result.offset}|${result.original}|${result.suggestions[0]}`;
             if (!seen.has(key)) {
               seen.add(key);
               results.push({ ...result, category: this.normalizeCategory(result.category) });
             }
+          } else {
+            throw new Error("AI 指出了问题，但原文不存在或无法唯一定位，请使用更完整的原文短语");
           }
         }
         return results;
@@ -1692,17 +1692,7 @@ var AIDetector = class {
     return "typo";
   }
   buildPrompt(text, mode) {
-    const baseInstruction = `你是中文出版级校对助手，直接给出结论，不要思考过程。
-
-重点任务（优先级最高）：
-1. 检查“的、地、得”的误用：
-   - “的”通常连接定语和名词：美丽的风景
-   - “地”通常连接状语和动词：认真地学习、慢慢地走
-   - “得”通常置于动词或形容词后补充程度、结果：跑得快、写得很好
-   - 只有在结合完整短语和句法后能确定错误时才报告
-   - 报告时 original 必须包含足以判断的完整短语，不能只返回单个“的”“地”或“得”
-2. 检查固定词组、成语、惯用搭配中的别字，例如：迫不及待（不是“迫不急待”）、一如既往（不是“一如即往”）、相辅相成（不是“相辅相承”）
-3. 不把文学表达、人物名、地名、专有名词、方言或刻意口语化当作错误`;
+    const baseInstruction = `请校对以下中文文本，优先检查错别字及“的、地、得”误用：定语用“的”，状语用“地”，补语用“得”。仅报告结合上下文能确定的问题，不随意改写文学表达、专名和方言。`;
     let taskInstruction = "";
     let categoryInstruction = "";
     switch (mode) {
@@ -1736,21 +1726,14 @@ ${taskInstruction}
 文本：
 ${text}
 
-请严格按照以下 JSON 数组格式返回结果，不要返回任何其他文字：
-[{"start": 0, "end": 4, "original": "公作", "correct": "工作", "reason": "同音字误用", "category": "typo"}]
-
-注意：
-1. start、end 是问题片段在文本中的从零开始字符下标，end 不包含在片段内
-2. original 必须与下标完全一致（text.slice(start, end) === original）
-3. correct 是建议的正确内容
-4. reason 是简要的纠错原因（不超过 20 个字）
-5. ${categoryInstruction}
-6. “的、地、得”误用必须上报包含完整短语的 original，不能只返回单个“的”“地”或“得”
-7. 如果没有发现问题，返回空数组 []
-8. 保持原意，不要改动文学性修辞、专有名词、人名地名、方言或刻意口语化
-9. 只返回确定有问题的，不确定的不返回
-10. 结果条目不超过 20 条
-11. 只返回 JSON 数组，不要有任何其他输出`;
+只返回 JSON 数组，不要 Markdown 代码块或其他文字，格式：
+[{"original":"认真得学习","correct":"认真地学习","reason":"状语应用地","category":"typo"}]
+规则：
+1. original 必须逐字复制待检查文本中含错误的完整短语，且在文本中唯一出现；若重复请扩展上下文。不要计算或返回字符下标。
+2. correct 是修改后的短语，必须不同于 original；删除赘余文字时 correct 可以为空字符串，但 original 不得为空。reason 简短说明原因（20 字以内）。
+3. ${categoryInstruction}
+4. 最多 20 条；只报告确定的问题，保留原意，不推测缺失内容。
+5. 无问题时仅返回 []，禁止返回字段为空的占位记录。`;
   }
   findWordInText(word, text, baseOffset) {
     const results = [];
@@ -1827,17 +1810,20 @@ ${text}
     }
     try {
       let jsonStr = response.trim();
-      const jsonMatch = jsonStr.match(/\[[\s\S]*\]/);
-      if (jsonMatch) {
-        jsonStr = jsonMatch[0];
+      const fenced = jsonStr.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+      if (fenced) {
+        jsonStr = fenced[1];
       }
       const results = JSON.parse(jsonStr);
       if (!Array.isArray(results)) {
         throw new Error("返回结果不是数组");
       }
       const validResults = results.filter(
-        (r) => typeof r.original === "string" && typeof r.correct === "string" && r.original.length > 0 && r.correct.length > 0 && Number.isInteger(r.start) && Number.isInteger(r.end) && r.start >= 0 && r.end > r.start
+        (r) => r && typeof r === "object" && typeof r.original === "string" && typeof r.correct === "string" && r.original.trim().length > 0 && r.original !== r.correct && typeof r.reason === "string" && typeof r.category === "string"
       );
+      if (validResults.length !== results.length) {
+        return { results: [], parseError: true };
+      }
       return { results: validResults, parseError: false };
     } catch (error) {
       console.error("Failed to parse AI response:", response);
@@ -1862,9 +1848,9 @@ var DetectionScheduler = class {
   setProgressCallback(callback) {
     this.onProgress = callback;
   }
-  async detect() {
+  async detect(snapshot) {
     this.reportProgress({ status: "detecting", currentStep: "提取文本..." });
-    const extractionResult = this.textExtractor.extractText();
+    const extractionResult = snapshot || this.textExtractor.extractText();
     if (!extractionResult) {
       throw new Error("无法获取当前文档内容");
     }
@@ -1896,6 +1882,9 @@ var DetectionScheduler = class {
           for (const result of aiOutcome.results) {
             if (!this.settings.ignoredWords.includes(result.original)) {
               const originalOffset = mapper.cleanOffsetToOriginal(result.offset);
+              if (originalText.slice(originalOffset, originalOffset + result.original.length) !== result.original) {
+                throw new Error("AI 结果映射回原文后不匹配，不能安全替换，请缩小检测范围");
+              }
               allResults.push({
                 ...result,
                 offset: originalOffset
@@ -1903,7 +1892,7 @@ var DetectionScheduler = class {
             }
           }
           if (aiOutcome.failedCount > 0) {
-            new import_obsidian4.Notice(`AI 检测不完整：${aiOutcome.failedCount} 个分段响应异常（已重试），结果可能漏检`);
+            throw new Error(`AI 检测不完整：${aiOutcome.failedCount} 个分段响应异常或无法定位（已重试），不能判定为无错误`);
           }
         } catch (error) {
           console.error("AI detection error:", error);
@@ -2017,11 +2006,21 @@ var CSCPlugin = class extends import_obsidian5.Plugin {
     this.scheduler = null;
     this.detectionResults = [];
     this.originalText = "";
+    this.detectionRequestId = 0;
   }
   async onload() {
     await this.loadSettings();
     await this.syncLicenseStatus();
     this.scheduler = new DetectionScheduler(this.settings, this.app);
+    this.lastMarkdownView = this.app.workspace.getActiveViewOfType(import_obsidian5.MarkdownView);
+    this.lastMarkdownPath = this.lastMarkdownView?.file?.path;
+    this.registerEvent(this.app.workspace.on("active-leaf-change", (leaf) => {
+      if (leaf?.view instanceof import_obsidian5.MarkdownView) this.handleMarkdownViewChanged(leaf.view);
+    }));
+    this.registerEvent(this.app.workspace.on("file-open", () => {
+      const view = this.getMarkdownView();
+      if (view) this.handleMarkdownViewChanged(view);
+    }));
     this.registerEditorExtension([highlightsField, highlightTheme, import_view.EditorView.updateListener.of((update) => {
       if (update.docChanged) {
         this.handleDocChanged(update);
@@ -2096,28 +2095,38 @@ var CSCPlugin = class extends import_obsidian5.Plugin {
     });
   }
   getMarkdownView() {
-    const activeView = this.app.workspace.getActiveViewOfType(import_obsidian5.MarkdownView);
-    if (activeView) {
-      return activeView;
-    }
-    const leaves = this.app.workspace.getLeavesOfType("markdown");
-    for (const leaf of leaves) {
-      const view = leaf.view;
-      if (view instanceof import_obsidian5.MarkdownView && view.getMode() === "source") {
-        return view;
-      }
-    }
-    for (const leaf of leaves) {
-      const view = leaf.view;
-      if (view instanceof import_obsidian5.MarkdownView) {
-        return view;
-      }
-    }
+    const workspace = this.app.workspace;
+    const leaves = workspace.getLeavesOfType("markdown");
+    const activeFile = workspace.getActiveFile?.();
+    const candidates = [workspace.getActiveViewOfType(import_obsidian5.MarkdownView), this.lastMarkdownView, workspace.getMostRecentLeaf?.()?.view];
+    const usable = (view) => view instanceof import_obsidian5.MarkdownView && leaves.some((leaf) => leaf.view === view) && (!activeFile || view.file?.path === activeFile.path);
+    for (const view of candidates) if (usable(view)) return view;
+    if (activeFile) return leaves.map((leaf) => leaf.view).find(usable) || null;
     return null;
+  }
+  handleMarkdownViewChanged(view) {
+    const path = view.file?.path;
+    const sameDocument = this.detectionTarget ? this.detectionTarget.view === view && this.detectionTarget.path === path : this.lastMarkdownView === view && this.lastMarkdownPath === path;
+    if (!sameDocument) {
+      this.clearEditorHighlights();
+      this.detectionRequestId = (this.detectionRequestId || 0) + 1;
+      this.detecting = false;
+      this.detectionResults = [];
+      this.detectionTarget = null;
+      this.originalText = "";
+      if (this.refreshTimer) { clearTimeout(this.refreshTimer); this.refreshTimer = null; }
+    }
+    this.lastMarkdownView = view;
+    this.lastMarkdownPath = path;
+    if (!sameDocument && this.view) {
+      this.view.activeFilter = "all";
+      this.view.setResults([], "");
+      this.view.setStatus("idle");
+    }
   }
   getEditorView() {
     var _a;
-    const mdView = this.getMarkdownView();
+    const mdView = this.detectionTarget ? (this.isDetectionTargetValid() ? this.detectionTarget.view : null) : this.getMarkdownView();
     if (!mdView)
       return null;
     const cm = (_a = mdView.editor) == null ? void 0 : _a.cm;
@@ -2133,6 +2142,7 @@ var CSCPlugin = class extends import_obsidian5.Plugin {
     }
   }
   async startDetection() {
+    if (this.detecting) return;
     const activeFile = this.app.workspace.getActiveFile();
     if (!activeFile) {
       new import_obsidian5.Notice("没有打开的文档");
@@ -2144,8 +2154,21 @@ var CSCPlugin = class extends import_obsidian5.Plugin {
       return;
     }
     const editor = mdView.editor;
-    this.originalText = editor.getValue();
+    this.handleMarkdownViewChanged(mdView);
     this.clearEditorHighlights();
+    if (this.refreshTimer) { clearTimeout(this.refreshTimer); this.refreshTimer = null; }
+    const target = { view: mdView, editor, path: mdView.file?.path };
+    this.detectionTarget = target;
+    this.detectionResults = [];
+    this.originalText = editor.getValue();
+    const selection = editor.getSelection();
+    const snapshot = { text: this.originalText, hasSelection: !!selection };
+    if (selection) {
+      snapshot.selectionRange = { from: editor.posToOffset(editor.getCursor("from")), to: editor.posToOffset(editor.getCursor("to")) };
+    }
+    this.detecting = true;
+    const requestId = this.detectionRequestId = (this.detectionRequestId || 0) + 1;
+    this.detectionInvalidated = false;
     this.activateView();
     if (!this.scheduler) {
       this.scheduler = new DetectionScheduler(this.settings, this.app);
@@ -2154,7 +2177,17 @@ var CSCPlugin = class extends import_obsidian5.Plugin {
       this.view.setStatus("detecting");
     }
     try {
-      this.detectionResults = await this.scheduler.detect();
+      const results = await this.scheduler.detect(snapshot);
+      if (requestId !== this.detectionRequestId) return;
+      if (this.app.workspace.getActiveFile()?.path !== target.path) {
+        const current = this.getMarkdownView();
+        if (current) this.handleMarkdownViewChanged(current);
+        return;
+      }
+      if (!this.isDetectionTargetValid() || this.detectionInvalidated || editor.getValue() !== snapshot.text) {
+        throw new Error("检测期间原文或目标标签已变化，请重新检测");
+      }
+      this.detectionResults = results;
       if (this.view) {
         this.view.setResults(this.detectionResults, this.originalText);
         this.view.setStatus("completed");
@@ -2171,11 +2204,14 @@ var CSCPlugin = class extends import_obsidian5.Plugin {
         new import_obsidian5.Notice(`发现 ${this.detectionResults.length} 处问题`);
       }
     } catch (error) {
+      if (requestId !== this.detectionRequestId) return;
       console.error("Detection error:", error);
       if (this.view) {
         this.view.setStatus("error", error instanceof Error ? error.message : "检测失败");
       }
       new import_obsidian5.Notice("检测失败: " + (error instanceof Error ? error.message : "未知错误"));
+    } finally {
+      if (requestId === this.detectionRequestId) this.detecting = false;
     }
   }
   locateResultInEditor(editor, result) {
@@ -2265,10 +2301,13 @@ var CSCPlugin = class extends import_obsidian5.Plugin {
       this.clearEditorHighlights();
     }
     if (this.view) {
-      this.view.setResults(this.detectionResults);
+      this.view.setResults(this.detectionResults, this.originalText);
     }
   }
   handleDocChanged(update) {
+    if (!this.isDetectionTargetValid() || update.view !== this.detectionTarget.editor.cm) return;
+    this.originalText = update.state?.doc?.toString() ?? this.detectionTarget.editor.getValue();
+    if (this.detecting) { this.detectionInvalidated = true; return; }
     if (this.detectionResults.length === 0) {
       return;
     }
@@ -2303,8 +2342,13 @@ var CSCPlugin = class extends import_obsidian5.Plugin {
     new import_obsidian5.Notice("已清除编辑器高亮");
   }
   getEditor() {
-    const mdView = this.getMarkdownView();
-    return (mdView == null ? void 0 : mdView.editor) || null;
+    return this.isDetectionTargetValid() ? this.detectionTarget.editor : null;
+  }
+  isDetectionTargetValid() {
+    const target = this.detectionTarget;
+    if (!target || target.view.editor !== target.editor || target.view.file?.path !== target.path) return false;
+    const leaves = this.app?.workspace?.getLeavesOfType?.("markdown");
+    return !leaves || leaves.some((leaf) => leaf.view === target.view);
   }
   getResults() {
     return this.detectionResults;
