@@ -65,20 +65,10 @@ debounced renderResults（150ms）
 - **增量平移**：按字符增减量单位移动后续偏移，不涉及 AI 重新检测
 - **restoreScroll**：替换后恢复 scrollTop，消除画面跳跃
 
-## 文件说明
-
-本地开发仓库位于 `/Users/tahacoo/Programme/obsidian-ai-proofreader`。本地 `tests/` 和 `maintenance/` 保存回归测试与开发记录，不随运行版上传。Obsidian 插件目录只需三个运行文件，个人配置 `data.json` 由 Obsidian 管理，不上传 GitHub。
-
-| 文件 | 说明 |
-|------|------|
-| `main.js` | 编译后的插件代码 |
-| `manifest.json` | Obsidian 插件清单 |
-| `styles.css` | 界面样式 |
 
 ## 许可
 
 MIT License
 
 ## 作者
-
-[moaono.com](http://www.moaono.com)
+Tahacoo
