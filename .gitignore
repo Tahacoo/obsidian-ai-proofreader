@@ -4,3 +4,4 @@ tests/
 *.test.js
 *.test.cjs
 *.test.mjs
+maintenance/

@@ -41,10 +41,10 @@ var CATEGORY_LABELS = {
 var MODE_LABELS = {
   quick: "快速模式",
   standard: "标准模式",
-  deep: "深度模式"
+  deep: "深度优化"
 };
 var MODE_DESCRIPTIONS = {
-  quick: "仅检测错别字（音近字、形近字、笔误）",
+  quick: "检测错别字、“的、地、得”误用及固定词组",
   standard: "检测错别字 + 标点符号 + 语法错误",
   deep: "全部检测 + 表达优化建议"
 };
@@ -625,12 +625,11 @@ var CSCView = class extends import_obsidian2.ItemView {
       header.createEl("div", { cls: `csc-license-indicator ${licenseClass}` }, (indicator) => {
         indicator.createEl("span", { text: licenseLabel });
       });
-      const modeLabel = MODE_LABELS[this.plugin.settings.detectionMode] || "快速模式";
-      header.createEl("div", { cls: "csc-mode-indicator", text: modeLabel });
+      this.renderModeSelector(header);
       header.createEl("button", {
         cls: "csc-detect-btn"
       }, (btn) => {
-        if (this.status === "detecting") {
+        if (this.status === "detecting" || this.plugin.modeSaving) {
           btn.createEl("div", { cls: "csc-btn-spinner" });
           btn.createEl("span", { text: "检测中..." });
           btn.disabled = true;
@@ -643,6 +642,27 @@ var CSCView = class extends import_obsidian2.ItemView {
         });
       });
     });
+  }
+  renderModeSelector(container) {
+    const selected = this.plugin.settings.detectionMode;
+    const disabled = this.status === "detecting" || this.plugin.detecting || this.plugin.modeSaving;
+    container.createEl("div", { cls: "csc-mode-selector", attr: { role: "group", "aria-label": "检测模式" } }, (group) => {
+      for (const mode of ["quick", "standard", "deep"]) {
+        group.createEl("button", {
+          cls: `csc-mode-option${selected === mode ? " is-active" : ""}`,
+          text: MODE_LABELS[mode],
+          attr: { type: "button", "aria-pressed": String(selected === mode), title: MODE_DESCRIPTIONS[mode] }
+        }, (button) => {
+          button.disabled = !!disabled;
+          button.addEventListener("click", () => this.plugin.setDetectionMode(mode));
+        });
+      }
+    });
+    container.createEl("div", { cls: "csc-mode-description", text: MODE_DESCRIPTIONS[selected] || MODE_DESCRIPTIONS.quick });
+    const resultMode = this.plugin.detectionTarget?.mode;
+    if (this.status === "completed" && resultMode && resultMode !== selected) {
+      container.createEl("div", { cls: "csc-mode-result-note", text: `当前结果来自${MODE_LABELS[resultMode]}；点击“开始检测”应用新模式。` });
+    }
   }
   renderFilterBar(container) {
     if (this.results.length === 0 || this.status !== "completed")
@@ -689,6 +709,10 @@ var CSCView = class extends import_obsidian2.ItemView {
         });
         break;
       case "completed":
+        if (this.plugin?.detectionIncompleteCount > 0) {
+          container.createEl("span", { text: `检测不完整 · ${this.results.length} 条可用建议`, cls: "csc-status-badge csc-status-warning" });
+          break;
+        }
         const count = this.results.length;
         if (count === 0) {
           container.createEl("span", {
@@ -719,6 +743,10 @@ var CSCView = class extends import_obsidian2.ItemView {
       if (this.status === "error") {
         this.renderError(content);
         return;
+      }
+      if (this.status === "completed" && this.plugin.detectionIncompleteCount > 0) {
+        content.createEl("div", { cls: "csc-incomplete-warning", text: "检测不完整：部分响应异常或建议无法安全定位（已重试）。下方仅显示可精确匹配的建议；没有显示的部分不能判定为无错误。" });
+        if (this.results.length === 0) return;
       }
       if (this.results.length === 0 && this.status === "completed") {
         this.renderSuccess(content);
@@ -1608,17 +1636,17 @@ var AIDetector = class {
     }
     const prompt = this.buildPrompt(segment.text, this.settings.detectionMode);
     let lastError = null;
+    let retryFeedback = "";
+    const partialResults = new Map();
     for (let attempt = 0; attempt < 3; attempt++) {
       if (attempt > 0) {
         await new Promise((resolve) => setTimeout(resolve, 1200 * attempt));
       }
       try {
-        const response = await this.callAPI(prompt);
+        const response = await this.callAPI(prompt + retryFeedback);
         const parsed = this.parseResponse(response);
-        if (parsed.parseError) {
-          lastError = new Error("AI 响应为空或格式异常");
-          continue;
-        }
+        let rejected = parsed.parseError || (!!lastError && parsed.results.length === 0);
+        const rejectedOriginals = [];
         const results = [];
         const seen = /* @__PURE__ */ new Set();
         for (const r of parsed.results) {
@@ -1639,7 +1667,9 @@ var AIDetector = class {
             if (segment.offsets) {
               const start = segment.offsets.indexOf(result.offset);
               if (start < 0 || start + result.original.length > segment.offsets.length || !segment.offsets.slice(start, start + result.original.length).every((offset, index) => offset === result.offset + index)) {
-                throw new Error("AI 结果跨越不连续的文本位置，不能安全替换");
+                rejected = true;
+                rejectedOriginals.push(r.original);
+                continue;
               }
             }
             const key = `${result.offset}|${result.original}|${result.suggestions[0]}`;
@@ -1648,16 +1678,22 @@ var AIDetector = class {
               results.push({ ...result, category: this.normalizeCategory(result.category) });
             }
           } else {
-            throw new Error("AI 指出了问题，但原文不存在或无法唯一定位，请使用更完整的原文短语");
+            rejected = true;
+            rejectedOriginals.push(r.original);
           }
         }
-        return results;
+        for (const result of results) partialResults.set(`${result.offset}|${result.original}`, result);
+        if (!rejected) return results;
+        lastError = new Error("AI 部分响应格式异常，或原文无法精确唯一定位");
+        retryFeedback = `\n\n重试反馈：上次部分条目无效${rejectedOriginals.length ? "，包括 " + JSON.stringify(rejectedOriginals) : ""}。请重新核对全部文本，original 必须逐字复制原文，严格保留中文弯引号“”、英文直引号、标点、空格与换行，禁止自行规范化原文。若短语重复请增加上下文。请返回完整有效的 JSON 数组，不要空占位记录。`;
       } catch (error) {
         lastError = error;
         console.error(`AI detection error (attempt ${attempt + 1}/3):`, error);
       }
     }
-    throw lastError || new Error("AI 检测失败");
+    const error = lastError || new Error("AI 检测失败");
+    error.partialResults = [...partialResults.values()];
+    throw error;
   }
   async detectSegments(segments, onProgress) {
     const allResults = [];
@@ -1674,6 +1710,7 @@ var AIDetector = class {
         allResults.push(...results);
       } catch (error) {
         failedCount++;
+        if (Array.isArray(error.partialResults)) allResults.push(...error.partialResults);
         console.error(`Error detecting segment ${i}:`, error);
       }
     }
@@ -1822,7 +1859,7 @@ ${text}
         (r) => r && typeof r === "object" && typeof r.original === "string" && typeof r.correct === "string" && r.original.trim().length > 0 && r.original !== r.correct && typeof r.reason === "string" && typeof r.category === "string"
       );
       if (validResults.length !== results.length) {
-        return { results: [], parseError: true };
+        return { results: validResults, parseError: true };
       }
       return { results: validResults, parseError: false };
     } catch (error) {
@@ -1862,6 +1899,7 @@ var DetectionScheduler = class {
     const cleanedText = cleanResult.text;
     const mapper = new OffsetMapper(cleanResult.mappings);
     const allResults = [];
+    let incompleteCount = 0;
     if (this.settings.apiKey) {
       this.reportProgress({ status: "detecting", currentStep: "准备 AI 检测..." });
       const segments = this.textSegmenter.segment(cleanedText);
@@ -1883,7 +1921,8 @@ var DetectionScheduler = class {
             if (!this.settings.ignoredWords.includes(result.original)) {
               const originalOffset = mapper.cleanOffsetToOriginal(result.offset);
               if (originalText.slice(originalOffset, originalOffset + result.original.length) !== result.original) {
-                throw new Error("AI 结果映射回原文后不匹配，不能安全替换，请缩小检测范围");
+                incompleteCount++;
+                continue;
               }
               allResults.push({
                 ...result,
@@ -1891,9 +1930,7 @@ var DetectionScheduler = class {
               });
             }
           }
-          if (aiOutcome.failedCount > 0) {
-            throw new Error(`AI 检测不完整：${aiOutcome.failedCount} 个分段响应异常或无法定位（已重试），不能判定为无错误`);
-          }
+          incompleteCount += aiOutcome.failedCount;
         } catch (error) {
           console.error("AI detection error:", error);
           new import_obsidian4.Notice("AI 检测失败，请检查 API 配置");
@@ -1908,7 +1945,9 @@ var DetectionScheduler = class {
         (r) => r.offset >= selectionRange.from && r.offset < selectionRange.to
       );
     }
-    return addParagraphOffsets(filteredResults, originalText);
+    const results = addParagraphOffsets(filteredResults, originalText);
+    results.incompleteCount = incompleteCount;
+    return results;
   }
   reportProgress(progress) {
     if (this.onProgress) {
@@ -2007,6 +2046,7 @@ var CSCPlugin = class extends import_obsidian5.Plugin {
     this.detectionResults = [];
     this.originalText = "";
     this.detectionRequestId = 0;
+    this.detectionIncompleteCount = 0;
   }
   async onload() {
     await this.loadSettings();
@@ -2068,6 +2108,27 @@ var CSCPlugin = class extends import_obsidian5.Plugin {
     if (this.scheduler) {
       this.scheduler.updateSettings(this.settings);
     }
+    this.view?.render?.();
+  }
+  async setDetectionMode(mode) {
+    if (!["quick", "standard", "deep"].includes(mode) || this.detecting || this.modeSaving) return false;
+    if (this.settings.detectionMode === mode) return true;
+    const previous = this.settings.detectionMode;
+    this.modeSaving = true;
+    this.settings.detectionMode = mode;
+    this.view?.render?.();
+    try {
+      await this.saveSettings();
+      return true;
+    } catch (error) {
+      this.settings.detectionMode = previous;
+      new import_obsidian5.Notice("检测模式保存失败，已恢复原模式");
+      console.error("Failed to save detection mode:", error);
+      return false;
+    } finally {
+      this.modeSaving = false;
+      this.view?.render?.();
+    }
   }
   async syncLicenseStatus() {
     const localLicenseType = activationService.checkLocalLicenseStatus();
@@ -2113,6 +2174,7 @@ var CSCPlugin = class extends import_obsidian5.Plugin {
       this.detecting = false;
       this.detectionResults = [];
       this.detectionTarget = null;
+      this.detectionIncompleteCount = 0;
       this.originalText = "";
       if (this.refreshTimer) { clearTimeout(this.refreshTimer); this.refreshTimer = null; }
     }
@@ -2142,7 +2204,7 @@ var CSCPlugin = class extends import_obsidian5.Plugin {
     }
   }
   async startDetection() {
-    if (this.detecting) return;
+    if (this.detecting || this.modeSaving) return;
     const activeFile = this.app.workspace.getActiveFile();
     if (!activeFile) {
       new import_obsidian5.Notice("没有打开的文档");
@@ -2157,9 +2219,10 @@ var CSCPlugin = class extends import_obsidian5.Plugin {
     this.handleMarkdownViewChanged(mdView);
     this.clearEditorHighlights();
     if (this.refreshTimer) { clearTimeout(this.refreshTimer); this.refreshTimer = null; }
-    const target = { view: mdView, editor, path: mdView.file?.path };
+    const target = { view: mdView, editor, path: mdView.file?.path, mode: this.settings?.detectionMode || "quick" };
     this.detectionTarget = target;
     this.detectionResults = [];
+    this.detectionIncompleteCount = 0;
     this.originalText = editor.getValue();
     const selection = editor.getSelection();
     const snapshot = { text: this.originalText, hasSelection: !!selection };
@@ -2188,6 +2251,7 @@ var CSCPlugin = class extends import_obsidian5.Plugin {
         throw new Error("检测期间原文或目标标签已变化，请重新检测");
       }
       this.detectionResults = results;
+      this.detectionIncompleteCount = results.incompleteCount || 0;
       if (this.view) {
         this.view.setResults(this.detectionResults, this.originalText);
         this.view.setStatus("completed");
@@ -2198,7 +2262,9 @@ var CSCPlugin = class extends import_obsidian5.Plugin {
           setHighlights(editorView, this.detectionResults);
         }
       }
-      if (this.detectionResults.length === 0) {
+      if (this.detectionIncompleteCount > 0) {
+        new import_obsidian5.Notice(`检测不完整：保留 ${this.detectionResults.length} 条可用建议，部分响应异常或无法定位`);
+      } else if (this.detectionResults.length === 0) {
         new import_obsidian5.Notice("太棒了！没有发现问题");
       } else {
         new import_obsidian5.Notice(`发现 ${this.detectionResults.length} 处问题`);
